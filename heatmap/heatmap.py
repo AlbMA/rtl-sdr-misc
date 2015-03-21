@@ -37,6 +37,12 @@ parser.add_argument('--db', dest='db_limit', nargs=2, default=None,
     help='Minimum and maximum db values.')
 parser.add_argument('--compress', dest='compress', default=0,
     help='Apply a gradual asymptotic time compression.  Values > 1 are the new target height, values < 1 are a scaling factor.')
+parser.add_argument('--extend', dest='ext_factor', default=1,
+    help='Increase height by the factor provided. New rows are genearated by interpolating samples.')
+parser.add_argument('--no-text', dest='no_text', action='store_true', default=False,
+    help='Remove text overlay')
+parser.add_argument('--color', dest='color', choices=['monocolor','multicolor'], default='monocolor',
+    help='Chose the heatmap color style')
 slicegroup = parser.add_argument_group('Slicing',
     'Efficiently render a portion of the data. (optional)  Frequencies can take G/M/k suffixes.  Timestamps look like "YYYY-MM-DD HH:MM:SS"  Durations take d/h/m/s suffixes.')
 slicegroup.add_argument('--low', dest='low_freq', default=None,
@@ -179,6 +185,7 @@ reparse('tail_time', duration_parse)
 reparse('head_time', lambda s: datetime.timedelta(seconds=s))
 reparse('tail_time', lambda s: datetime.timedelta(seconds=s))
 args.compress = float(args.compress)
+args.ext_factor = int(args.ext_factor) # Only integers are allowed
 
 if args.begin_time and args.tail_time:
     print("Can't combine --begin and --tail")
@@ -188,6 +195,9 @@ if args.end_time and args.head_time:
     sys.exit(2)
 if args.head_time and args.tail_time:
     print("Can't combine --head and --tail")
+    sys.exit(2)
+if args.compress and args.ext_factor:
+    print("Can't combine --compress and --extend")
     sys.exit(2)
 
 print("loading")
@@ -291,6 +301,7 @@ if args.compress:
 print("x: %i, y: %i, z: (%f, %f)" % (len(freqs), height2, min_z, max_z))
 
 def rgb2(z):
+
     g = (z - min_z) / (max_z - min_z)
     return (int(g*255), int(g*255), 50)
 
@@ -298,6 +309,8 @@ def rgb3(z):
     g = (z - min_z) / (max_z - min_z)
     c = colorsys.hsv_to_rgb(0.65-(g-0.08), 1, 0.2+g)
     return (int(c[0]*256),int(c[1]*256),int(c[2]*256))
+
+rgb = {'monocolor':rgb2, 'multicolor':rgb3} # Expand for more options
 
 def collate_row(x_size):
     # this is more fragile than the old code
@@ -343,7 +356,7 @@ def collate_row(x_size):
 
 print("drawing")
 tape_height = 25
-img = Image.new("RGB", (len(freqs), tape_height + height2))
+img = Image.new("RGB", (len(freqs), tape_height + height2*args.ext_factor)) # Extension factor added
 pix = img.load()
 x_size = img.size[0]
 average = [0.0] * len(freqs)
@@ -351,9 +364,14 @@ tally = 0
 old_y = None
 for t, zs in collate_row(x_size):
     y = times.index(t)
+    if y == 0:
+        last_row = zs
     if not args.compress:
         for x in range(len(zs)):
-            pix[x,y+tape_height] = rgb2(zs[x])
+            for off in range(args.ext_factor):
+                # Linear interpolation
+                pix[x,args.ext_factor*y+tape_height+off] = rgb[args.color](last_row[x] + off*(zs[x] - last_row[x])/args.ext_factor)
+        last_row = zs
         continue
     # ugh
     y = height2 - compression(height - y, args.compress)
@@ -477,7 +495,7 @@ draw = ImageDraw.Draw(img)
 font = ImageFont.load_default()
 pixel_width = step
 
-draw.rectangle([0,0,img.size[0],tape_height], fill='yellow')
+draw.rectangle([0,0,img.size[0],tape_height-1], fill='yellow') # Excessive height of tape corrected
 min_freq = min(freqs)
 max_freq = max(freqs)
 delta = max_freq - min_freq
@@ -495,7 +513,7 @@ for i in range(label_base, 0, -1):
 label_base = 10**label_base
 
 for scale,y in [(1,10), (5,15), (10,19), (50,22), (100,24), (500, 25)]:
-    hits = tape_lines(label_base/scale, y, tape_height)
+    hits = tape_lines(label_base/scale, y, tape_height-1)   # Excessive height of tape corrected
     pixels_per_hit = width / hits
     if pixels_per_hit > 50:
         tape_text(label_base/scale, y-tape_pt)
@@ -514,6 +532,7 @@ if args.time_tick:
         label_next += tick_delta
     last_y = -100
     for y,t in enumerate(times):
+        y *= args.ext_factor # Updated time positions for extended heatmaps
         label_time = date_parse(t)
         if label_time < label_next:
             continue
@@ -533,15 +552,15 @@ minutes = int((duration - 3600*hours) / 60)
 margin = 2
 if args.time_tick:
     margin = 60
-shadow_text(margin, img.size[1] - 45, 'Duration: %i:%02i' % (hours, minutes), font)
-shadow_text(margin, img.size[1] - 35, 'Range: %.2fMHz - %.2fMHz' % (min(freqs)/1e6, (max(freqs)+pixel_width)/1e6), font)
-shadow_text(margin, img.size[1] - 25, 'Pixel: %.2fHz x %is' % (pixel_width, int(round(pixel_height))), font)
-shadow_text(margin,  img.size[1] - 15, 'Started: {0}'.format(start), font)
+if not args.no_text:
+    shadow_text(margin, img.size[1] - 45, 'Duration: %i:%02i' % (hours, minutes), font)
+    shadow_text(margin, img.size[1] - 35, 'Range: %.2fMHz - %.2fMHz' % (min(freqs)/1e6, (max(freqs)+pixel_width)/1e6), font)
+    shadow_text(margin, img.size[1] - 25, 'Pixel: %.2fHz x %is' % (pixel_width, int(round(pixel_height))), font)
+    shadow_text(margin,  img.size[1] - 15, 'Started: {0}'.format(start), font)
 # bin size
 
 print("saving")
 img.save(output)
-
 
 
 
